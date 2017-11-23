@@ -96,6 +96,7 @@ typedef struct DASHContext {
     const char *single_file_name;
     const char *init_seg_name;
     const char *media_seg_name;
+    uint64_t segment_number_offset;
     AVRational min_frame_rate, max_frame_rate;
     int ambiguous_frame_rate;
 } DASHContext;
@@ -209,7 +210,7 @@ static void output_segment_list(OutputStream *os, AVIOContext *out, DASHContext 
         avio_printf(out, "\t\t\t\t<SegmentTemplate timescale=\"%d\" ", timescale);
         if (!c->use_timeline)
             avio_printf(out, "duration=\"%"PRId64"\" ", c->last_duration);
-        avio_printf(out, "initialization=\"%s\" media=\"%s\" startNumber=\"%d\">\n", c->init_seg_name, c->media_seg_name, c->use_timeline ? start_number : 1);
+        avio_printf(out, "initialization=\"%s\" media=\"%s\" startNumber=\"%ld\">\n", c->init_seg_name, c->media_seg_name, c->use_timeline ? start_number : c->segment_number_offset );
         if (c->use_timeline) {
             int64_t cur_time = 0;
             avio_printf(out, "\t\t\t\t\t<SegmentTimeline>\n");
@@ -701,7 +702,7 @@ static int dash_init(AVFormatContext *s)
         os->first_pts = AV_NOPTS_VALUE;
         os->max_pts = AV_NOPTS_VALUE;
         os->last_dts = AV_NOPTS_VALUE;
-        os->segment_index = 1;
+        os->segment_index = 0;
     }
 
     if (!c->has_video && c->min_seg_duration <= 0) {
@@ -861,7 +862,7 @@ static int dash_flush(AVFormatContext *s, int final, int stream)
         start_pos = avio_tell(os->ctx->pb);
 
         if (!c->single_file) {
-            dash_fill_tmpl_params(filename, sizeof(filename), c->media_seg_name, i, os->segment_index, os->bit_rate, os->start_pts);
+            dash_fill_tmpl_params(filename, sizeof(filename), c->media_seg_name, i, c->segment_number_offset + os->segment_index, os->bit_rate, os->start_pts);
             snprintf(full_path, sizeof(full_path), "%s%s", c->dirname, filename);
             snprintf(temp_path, sizeof(temp_path), use_rename ? "%s.tmp" : "%s", full_path);
             ret = s->io_open(s, &os->out, temp_path, AVIO_FLAG_WRITE, NULL);
@@ -922,7 +923,7 @@ static int dash_write_packet(AVFormatContext *s, AVPacket *pkt)
     DASHContext *c = s->priv_data;
     AVStream *st = s->streams[pkt->stream_index];
     OutputStream *os = &c->streams[pkt->stream_index];
-    int64_t seg_end_duration = (os->segment_index) * (int64_t) c->min_seg_duration;
+    int64_t seg_end_duration = (os->segment_index + 1) * (int64_t) c->min_seg_duration * 1000;
     int ret;
 
     ret = update_stream_extradata(s, os, st->codecpar);
@@ -962,7 +963,7 @@ static int dash_write_packet(AVFormatContext *s, AVPacket *pkt)
         c->total_duration = av_rescale_q(pkt->pts - os->first_pts,
                                          st->time_base,
                                          AV_TIME_BASE_Q);
-
+        //av_log(s, AV_LOG_WARNING, "Splitting at position %ld. Cur pts %ld First pts %ld end dur %ld \n", c->total_duration, pkt->pts ,os->first_pts, seg_end_duration);
         if ((!c->use_timeline || !c->use_template) && prev_duration) {
             if (c->last_duration < prev_duration*9/10 ||
                 c->last_duration > prev_duration*11/10) {
@@ -1063,6 +1064,7 @@ static const AVOption options[] = {
     { "single_file_name", "DASH-templated name to be used for baseURL. Implies storing all segments in one file, accessed using byte ranges", OFFSET(single_file_name), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, E },
     { "init_seg_name", "DASH-templated name to used for the initialization segment", OFFSET(init_seg_name), AV_OPT_TYPE_STRING, {.str = "init-stream$RepresentationID$.m4s"}, 0, 0, E },
     { "media_seg_name", "DASH-templated name to used for the media segments", OFFSET(media_seg_name), AV_OPT_TYPE_STRING, {.str = "chunk-stream$RepresentationID$-$Number%05d$.m4s"}, 0, 0, E },
+    { "start_seg_number", "Start number for segment numbering", OFFSET(segment_number_offset), AV_OPT_TYPE_INT64, {.i64 = 0 }, 0, INT_MAX, E },
     { NULL },
 };
 

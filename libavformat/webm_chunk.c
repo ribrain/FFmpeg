@@ -52,7 +52,9 @@ typedef struct WebMChunkContext {
     int chunk_index;
     char *http_method;
     uint64_t duration_written;
-    int prev_pts;
+    int64_t start_pts;
+    int64_t prev_pts;
+    int normal_sample_length;
     AVOutputFormat *oformat;
     AVFormatContext *avf;
 } WebMChunkContext;
@@ -68,6 +70,8 @@ static int chunk_mux_init(AVFormatContext *s)
         return ret;
     oc = wc->avf;
 
+    wc->start_pts = -1;
+    wc->normal_sample_length = 0;
     oc->interrupt_callback = s->interrupt_callback;
     oc->max_delay          = s->max_delay;
     av_dict_copy(&oc->metadata, s->metadata, 0);
@@ -201,22 +205,40 @@ static int webm_chunk_write_packet(AVFormatContext *s, AVPacket *pkt)
     AVFormatContext *oc = wc->avf;
     AVStream *st = s->streams[pkt->stream_index];
     int ret;
+    int delta;
 
-    if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-        wc->duration_written += av_rescale_q(pkt->pts - wc->prev_pts,
-                                             st->time_base,
-                                             (AVRational) {1, 1000});
+    if (wc->start_pts == -1) {
+        wc->start_pts = pkt->pts;
         wc->prev_pts = pkt->pts;
     }
+    delta = av_rescale_q(pkt->pts - wc->prev_pts,
+                                             st->time_base,
+                                             (AVRational) {1, 1000});
+    if ((delta > 100 )|| (delta<0)) {
+        wc->start_pts = pkt->pts;
+        wc->prev_pts = pkt->pts;
+        av_log(oc, AV_LOG_INFO, "Timestamp discontinuity oldpts %lld newpts %lld normal delta %ld current delta %ld\n", wc->prev_pts, pkt->pts, wc->normal_sample_length, delta);
+        delta = wc->normal_sample_length; 
+    } else {
+        wc->normal_sample_length = delta;
+    }
+
+    wc->duration_written += delta; 
+    wc->prev_pts = pkt->pts;
 
     // For video, a new chunk is started only on key frames. For audio, a new
     // chunk is started based on chunk_duration.
     if ((st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
-         (pkt->flags & AV_PKT_FLAG_KEY)) ||
+         (pkt->flags & AV_PKT_FLAG_KEY) && (pkt->pts == wc->start_pts || wc->duration_written >= wc->chunk_duration)) ||
         (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO &&
-         (pkt->pts == 0 || wc->duration_written >= wc->chunk_duration))) {
-        wc->duration_written = 0;
-        if ((ret = chunk_end(s)) < 0 || (ret = chunk_start(s)) < 0) {
+         (pkt->pts == wc->start_pts || wc->duration_written >= wc->chunk_duration))) {
+        if (pkt->pts > wc->start_pts) {
+            wc->duration_written = wc->duration_written - wc->chunk_duration;
+            if (ret = chunk_end(s)) {
+                goto fail;
+            }
+        } 
+        if (ret = chunk_start(s) < 0) { 
             goto fail;
         }
     }

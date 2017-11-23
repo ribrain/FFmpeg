@@ -2462,7 +2462,7 @@ static int mkv_write_trailer(AVFormatContext *s)
             return ret;
     }
 
-    if ((pb->seekable & AVIO_SEEKABLE_NORMAL) && !mkv->is_live) {
+    if (pb && (pb->seekable & AVIO_SEEKABLE_NORMAL) && !mkv->is_live) {
         if (mkv->cues->num_entries) {
             if (mkv->reserve_cues_space) {
                 int64_t cues_end;
